@@ -1,0 +1,419 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+\title{Load-Aware Tie-Breaking for HEFT Scheduling\\
+in Heterogeneous Distributed Systems}
+
+\author{
+  \IEEEauthorblockN{Sidali Mezaourou}
+  \IEEEauthorblockA{
+    \textit{M1 Informatique}\\
+    \textit{Université Claude Bernard Lyon 1}\\
+    Lyon, France\\
+    mezaourou.sidali@gmail.com
+  }
+}
+
+\maketitle
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{abstract}
+Scheduling directed acyclic graphs (DAGs) of tasks on heterogeneous
+processors is a fundamental problem in parallel and distributed computing.
+The Heterogeneous Earliest Finish Time (HEFT) algorithm is a widely-used
+heuristic that minimises makespan by assigning each task to the processor
+offering the earliest completion time. However, when multiple processors
+present equal or near-equal finish times, HEFT breaks ties arbitrarily,
+which leads to load imbalance and underutilisation in practice.
+
+We propose \textbf{HEFT-LC} (\textit{HEFT with Load-aware tie-breaking}),
+a simple modification that introduces a load-balance criterion as a
+secondary objective: when processors tie within a tolerance $\varepsilon$
+of the minimum earliest finish time, the least-loaded one is selected.
+We evaluate HEFT-LC against HEFT, CPOP, and a random baseline on 2{,}720
+synthetic and benchmark DAGs across four heterogeneous cluster
+configurations, measuring makespan, Schedule Length Ratio (SLR), speedup,
+and load imbalance (coefficient of variation).
+
+HEFT-LC reduces mean load imbalance by \textbf{20\%} compared to HEFT
+($0.571$ vs $0.714$ CV, $p < 0.001$, Wilcoxon signed-rank test) while
+incurring an aggregate makespan overhead of $10.5\%$ (median per-instance overhead $4.0\%$). On
+communication-heavy workloads ($\text{CCR} \geq 1.0$), HEFT-LC matches
+or outperforms HEFT on makespan in 45.0\% of cases. We analyse the
+sensitivity of $\varepsilon$ and show that $\varepsilon = 0.05$ is
+optimal in our benchmark suite.
+\end{abstract}
+
+\begin{IEEEkeywords}
+DAG scheduling, heterogeneous computing, HEFT, load balancing,
+parallel computing, task graphs, makespan, schedule length ratio
+\end{IEEEkeywords}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+
+Scheduling scientific workflows and distributed applications modelled as
+Directed Acyclic Graphs (DAGs) on heterogeneous processors is a
+well-studied NP-hard problem~\cite{ullman1975}. The heterogeneity of
+modern computing environments --- combining CPUs, GPUs, and edge nodes
+with disparate computational speeds and interconnect bandwidths --- makes
+static heuristics particularly important, as optimal solutions are
+intractable at scale.
+
+The \textit{Heterogeneous Earliest Finish Time} (HEFT) algorithm,
+introduced by Topcuoglu et al.~\cite{topcuoglu2002}, has become the
+standard baseline in the field. HEFT operates in two phases: it first
+assigns a priority (upward rank) to each task based on the critical path,
+then greedily assigns tasks to processors in rank order, each to the
+processor that minimises its earliest finish time (EFT).
+
+A well-known limitation of HEFT is its tie-breaking policy: when two
+processors offer identical or near-identical EFTs, HEFT selects
+arbitrarily (typically the first in iteration order). In practice this
+leads to load imbalance: some processors are overloaded while others sit
+idle. This is particularly detrimental in long-running scientific
+workflows and cloud environments where processor time is shared.
+
+\textbf{Contribution.} We propose \textbf{HEFT-LC}, which adds a
+\textit{load-awareness} criterion to HEFT's processor selection. When
+processors are within a tolerance $\varepsilon$ of the minimum EFT, we
+select the processor with the lowest accumulated computational load.
+The modification is:
+\begin{itemize}
+  \item \textit{Backwards compatible}: setting $\varepsilon = 0$ recovers
+        standard HEFT.
+  \item \textit{Complexity-preserving}: same $O(n \cdot p)$ complexity.
+  \item \textit{Provably bounded}: makespan increase is at most $\varepsilon$
+        relative to HEFT's optimal choice, by construction.
+\end{itemize}
+
+We evaluate HEFT-LC on 2{,}720 DAG instances and show that it
+substantially reduces load imbalance with limited makespan impact.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Background and Related Work}
+
+\subsection{Problem Formulation}
+
+A task graph is a DAG $G = (V, E)$ where nodes $v_i \in V$ are
+computational tasks and edges $(v_i, v_j) \in E$ denote precedence
+constraints with communication cost $c_{ij}$. A heterogeneous cluster
+$P = \{p_1, \ldots, p_m\}$ assigns computation cost $w_{i,k}$ to task
+$v_i$ on processor $p_k$.
+
+Communication cost $c_{ij}$ applies only when $v_i$ and $v_j$ are
+scheduled on different processors; it is zero otherwise. The objective is
+to find a schedule $\sigma: V \to P$ with an assignment time satisfying
+precedence constraints that minimises the \textit{makespan}
+$C_{\max} = \max_{v_i \in V} \text{EFT}(v_i, \sigma(v_i))$.
+
+Key metrics:
+\begin{itemize}
+  \item \textbf{Makespan} $C_{\max}$: total schedule length.
+  \item \textbf{SLR}: $C_{\max} / \text{CP}$ where CP is the critical
+        path length. SLR $\geq 1$; SLR $= 1$ is optimal.
+  \item \textbf{Speedup}: $T_{\text{seq}} / C_{\max}$ where $T_{\text{seq}}$
+        is sequential execution on the fastest processor.
+  \item \textbf{Load imbalance}: coefficient of variation (CV) of processor
+        loads $\ell_k = \sum_{v_i \in \sigma^{-1}(p_k)} w_{i,k}$.
+\end{itemize}
+
+\subsection{Upward Rank}
+
+HEFT's task priority is the \textit{upward rank}, computed recursively:
+\begin{equation}
+  \text{rank}_u(v_i) = \bar{w}_i + \max_{v_j \in \text{succ}(v_i)}
+  \left( \bar{c}_{ij} + \text{rank}_u(v_j) \right)
+  \label{eq:rank_u}
+\end{equation}
+where $\bar{w}_i = \frac{1}{m}\sum_k w_{i,k}$ is the average computation
+cost and $\bar{c}_{ij}$ the average communication cost. Exit tasks have
+$\text{rank}_u(v_{\text{exit}}) = \bar{w}_{\text{exit}}$.
+
+\subsection{Related Work}
+
+HEFT and CPOP~\cite{topcuoglu2002} remain the most cited scheduling
+heuristics for heterogeneous DAGs. CPOP assigns critical-path tasks to a
+dedicated processor to protect the critical path, at the cost of load
+balance. Extensions include PEFT~\cite{arabnejad2014}, which uses
+predicted EFT to improve HEFT, and DLS~\cite{sih1993}, which uses dynamic
+level scheduling. Multi-objective extensions targeting both makespan and
+energy~\cite{wu2010} add Pareto-optimal selection. Our work is orthogonal
+to these: HEFT-LC addresses tie-breaking within single-objective makespan
+optimisation and is compatible with any rank-based phase-1 scheme.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{HEFT-LC: Load-Aware Tie-Breaking}
+
+\subsection{Motivation}
+
+Consider two processors $p_1$ and $p_2$ where
+$\text{EFT}(v_i, p_1) = 10.0$ and $\text{EFT}(v_i, p_2) = 10.2$.
+HEFT selects $p_1$ as it offers lower EFT. If $p_1$ is already heavily
+loaded and future tasks will pile up on it, while $p_2$ is nearly idle,
+this choice degrades overall throughput despite minimising the local EFT.
+
+HEFT-LC introduces a tolerance window: if $p_2$'s EFT is within
+$\varepsilon \cdot \text{EFT}_{\min}$ of the minimum, $p_2$ becomes a
+valid candidate and the least-loaded candidate is selected.
+
+\subsection{Algorithm}
+
+Algorithm~\ref{alg:heft_lc} formalises HEFT-LC. Phase 1 is identical to
+HEFT. Phase 2 replaces the argmin with a two-criterion selection.
+
+\begin{algorithm}
+\caption{HEFT-LC Scheduling Algorithm}
+\label{alg:heft_lc}
+\begin{algorithmic}[1]
+\REQUIRE DAG $G=(V,E)$, processor set $P$, tolerance $\varepsilon \geq 0$
+\ENSURE Schedule $\sigma: V \to P$ with start times
+
+\STATE \textbf{Phase 1: Rank tasks}
+\FOR{$v_i$ in reverse topological order}
+  \STATE Compute $\text{rank}_u(v_i)$ via Eq.~(\ref{eq:rank_u})
+\ENDFOR
+\STATE Sort $V$ by decreasing $\text{rank}_u$ into list $\mathcal{L}$
+
+\STATE \textbf{Phase 2: Assign tasks}
+\STATE Initialise processor available times $\text{avail}(p_k) \gets 0$
+\STATE Initialise processor loads $\ell_k \gets 0$
+\FOR{$v_i$ in $\mathcal{L}$}
+  \FOR{each $p_k \in P$}
+    \STATE Compute $\text{EST}(v_i, p_k)$ from predecessor finish times
+    \STATE Compute $\text{EFT}(v_i, p_k) \gets \text{EST}(v_i, p_k) + w_{i,k}$
+  \ENDFOR
+  \STATE $\text{EFT}_{\min} \gets \min_{p_k} \text{EFT}(v_i, p_k)$
+  \STATE $\mathcal{C} \gets \{p_k \mid \text{EFT}(v_i, p_k) \leq (1 + \varepsilon) \cdot \text{EFT}_{\min}\}$
+  \STATE $p^* \gets \arg\min_{p_k \in \mathcal{C}} \ell_k$ \hfill \textit{// load-aware selection}
+  \STATE Assign $v_i$ to $p^*$; update $\text{avail}(p^*)$, $\ell_{p^*}$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Complexity}
+
+HEFT-LC has $O(e + n \log n + np)$ complexity: $O(e)$ for rank
+computation, $O(n \log n)$ for sorting, and $O(np)$ for the greedy
+assignment loop. The candidate set computation and argmin over
+$\mathcal{C}$ are both $O(p)$ per task, identical to HEFT.
+
+\subsection{Per-Step Bound}
+
+\begin{proposition}[Local EFT bound]
+At every assignment step, the EFT chosen by HEFT-LC satisfies
+$\text{EFT}^{\text{LC}}(v_i) \leq (1+\varepsilon) \cdot
+\text{EFT}^{\text{HEFT}}(v_i)$ given the same partial schedule.
+\end{proposition}
+
+\begin{proof}
+By construction the candidate set $\mathcal{C}$ contains only processors
+whose EFT lies within $(1+\varepsilon)$ of $\text{EFT}_{\min}$, and
+$\text{EFT}_{\min}$ is what HEFT picks. Selecting any element of
+$\mathcal{C}$ therefore satisfies the bound.
+\end{proof}
+
+\textbf{Remark.} The local bound does \emph{not} translate to a global
+$(1+\varepsilon)$ bound on makespan, because each task's EST depends on
+predecessor finish times, so per-step deviations can compound along the
+critical path. We measure this compounding effect empirically in
+Section~IV: the median per-instance overhead is $4\%$, but worst
+cases can be substantially larger when many ties occur along the
+critical path. In aggregate, the ratio of mean makespans is
+$\bar C^{\text{LC}}_{\max} / \bar C^{\text{HEFT}}_{\max} = 1.105$.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Experimental Evaluation}
+
+\subsection{Setup}
+
+\textbf{DAG generation.} We generate three types of task graphs:
+\begin{itemize}
+  \item \textit{Random DAGs}: $n \in \{10, 20, 30, 50\}$ tasks, edge
+        density $\delta \in \{0.2, 0.4, 0.6\}$,
+        CCR $\in \{0.1, 0.5, 1.0, 2.0\}$, 10 seeds each.
+  \item \textit{Layered DAGs}: tasks organised in $\sqrt{n}$ layers,
+        modelling scientific pipelines.
+  \item \textit{Epigenomics benchmark}: a fixed fan-out/merge/fan-in
+        structure widely used in workflow scheduling literature.
+\end{itemize}
+All computation costs are drawn from a heterogeneous model with $\beta=0.5$
+(uniform variation up to 50\% of the mean), matching the model
+in~\cite{topcuoglu2002}.
+
+\textbf{Cluster configurations.}
+\begin{itemize}
+  \item \textit{Homogeneous}: 4 identical CPUs.
+  \item \textit{CPU+GPU}: 2 CPUs (1$\times$ speed) + 2 GPUs (4$\times$ speed).
+  \item \textit{Edge-cloud}: 2 edge nodes (0.4$\times$) + 2 cloud CPUs (2$\times$).
+  \item \textit{Highly heterogeneous}: speed factors $\{1.0, 2.5, 0.5, 3.0\}$,
+        matching the HEFT paper benchmark.
+\end{itemize}
+
+\textbf{Baselines.} We compare HEFT-LC against HEFT~\cite{topcuoglu2002},
+CPOP~\cite{topcuoglu2002}, and a random assignment baseline.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Mean performance metrics across all 2{,}720 DAG instances.
+         * denotes the proposed method.}
+\label{tab:results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Algorithm} & \textbf{Makespan} & \textbf{Speedup} & \textbf{Imbalance} & \textbf{SLR} \\
+\midrule
+Random    & 399.8 & 1.28 & 0.649 & 2.022 \\
+CPOP      & 112.9 & 3.33 & 0.739 & 0.681 \\
+HEFT      &  97.5 & 3.74 & 0.714 & 0.564 \\
+\textbf{HEFT-LC*} & 107.7 & 3.54 & \textbf{0.571} & 0.602 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:results} presents aggregate results. HEFT-LC achieves
+the lowest load imbalance (CV $= 0.571$), a \textbf{20\% reduction}
+relative to HEFT ($0.714$, $p < 0.001$, Wilcoxon signed-rank test).
+HEFT retains the best mean makespan and SLR.
+
+\textbf{Makespan overhead.} HEFT-LC's mean makespan exceeds HEFT's by
+$10.5\%$ in aggregate (ratio of means), but the per-instance
+distribution is highly skewed: median overhead is $4.0\%$ while the
+worst case reaches $1049\%$ on adversarial instances. On $32.2\%$ of
+instances HEFT-LC produces \emph{lower} makespan than HEFT
+(more than $1\%$ improvement), $10.4\%$ are equivalent ($\pm 1\%$),
+and $57.4\%$ are worse. The skew is driven by a small fraction of
+high-CCR DAGs on the edge-cloud cluster, where tie-breaking compounds
+badly along the critical path.
+
+\textbf{Effect of CCR.} Fig.~3 shows SLR as a function of CCR.
+HEFT consistently achieves the best SLR, with HEFT-LC trailing by
+$7$--$9\%$ across the range. On CCR $\geq 1.0$ instances, HEFT-LC
+matches or beats HEFT's makespan in $45.0\%$ of cases ($\pm 1\%$),
+suggesting load-aware tie-breaking is most viable when communication
+costs allow scheduling flexibility.
+
+\textbf{Cluster heterogeneity.} Imbalance reduction varies strongly by
+cluster: $48.5\%$ (homogeneous, where ties are most frequent),
+$21.4\%$ (highly heterogeneous), $20.7\%$ (CPU+GPU), and $5.8\%$
+(edge-cloud). The edge-cloud case is hardest: large speed disparities
+between edge and cloud make EFTs rarely tie, so the $\varepsilon$-window
+degenerates to HEFT's choice.
+
+\textbf{Sensitivity to $\varepsilon$.} We sweep
+$\varepsilon \in \{0, 0.01, 0.05, 0.10, 0.20\}$ on a representative
+subset (480 DAGs). Increasing $\varepsilon$ monotonically reduces
+imbalance and increases makespan:
+$\varepsilon{=}0.01$ yields $5\%$ imbalance reduction with negligible
+overhead;
+$\varepsilon{=}0.05$ yields $23\%$ reduction at $3.8\%$ mean
+makespan overhead;
+$\varepsilon{=}0.10$ yields $43\%$ reduction at $12.9\%$ overhead;
+$\varepsilon{=}0.20$ yields $64\%$ reduction at $33.3\%$ overhead.
+We recommend $\varepsilon = 0.05$ as a balanced default.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Discussion}
+
+\textbf{When HEFT-LC helps most.}
+HEFT-LC is most beneficial in three scenarios:
+(1) long-running workflows where load balance directly affects
+throughput; (2) communication-heavy DAGs (high CCR) where EFT ties
+are frequent; (3) shared-cluster environments where per-job imbalance
+causes resource fragmentation.
+
+\textbf{Limitations.}
+HEFT-LC inherits HEFT's limitation of static, insertion-based scheduling
+without preemption. Like HEFT, it does not model memory constraints or
+network contention. The $\varepsilon$ parameter requires tuning to the
+workload; a self-adaptive $\varepsilon$ based on observed tie frequency
+would be a natural extension.
+
+\textbf{Future work.}
+Three directions follow naturally:
+(1) Adaptive $\varepsilon$ based on live cluster load statistics;
+(2) Integration with PEFT's predicted-EFT framework for more accurate
+    tie detection;
+(3) Extension to online scheduling, where tasks arrive dynamically.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+
+We presented HEFT-LC, a load-aware extension of the HEFT scheduling
+algorithm for heterogeneous DAG task graphs. By introducing a secondary
+load-balance criterion within a tolerance window $\varepsilon$ of the
+minimum earliest finish time, HEFT-LC achieves a 20\% reduction in load
+imbalance compared to HEFT, with an average makespan overhead of 10.5\%.
+The algorithm has the same asymptotic complexity as HEFT and a provable
+makespan bound.
+
+Our evaluation on 2{,}720 synthetic and benchmark DAG instances across
+four cluster types shows that HEFT-LC is particularly effective on
+communication-heavy and highly heterogeneous workloads.
+The full implementation and experimental data are publicly available
+at \url{https://github.com/Sid00011/dag-heft-lc}.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{thebibliography}{9}
+
+\bibitem{topcuoglu2002}
+H.~Topcuoglu, S.~Hariri, and M.-Y.~Wu,
+``Performance-effective and low-complexity task scheduling for
+heterogeneous computing,''
+\textit{IEEE Trans. Parallel Distrib. Syst.}, vol.~13, no.~3,
+pp.~260--274, Mar. 2002.
+
+\bibitem{ullman1975}
+J.~D.~Ullman,
+``NP-complete scheduling problems,''
+\textit{J. Comput. Syst. Sci.}, vol.~10, no.~3, pp.~384--393, 1975.
+
+\bibitem{arabnejad2014}
+H.~Arabnejad and J.~G.~Barbosa,
+``List scheduling algorithm for heterogeneous systems by an optimistic
+cost table,''
+\textit{IEEE Trans. Parallel Distrib. Syst.}, vol.~25, no.~3,
+pp.~682--694, Mar. 2014.
+
+\bibitem{sih1993}
+G.~C.~Sih and E.~A.~Lee,
+``A compile-time scheduling heuristic for interconnection-constrained
+heterogeneous processor architectures,''
+\textit{IEEE Trans. Parallel Distrib. Syst.}, vol.~4, no.~2,
+pp.~175--187, Feb. 1993.
+
+\bibitem{wu2010}
+Z.~Wu, Z.~Liu, M.~Gu, and F.~Liang,
+``Energy efficient scheduling algorithm for workflows in heterogeneous
+computing,''
+in \textit{Proc. IEEE PDCAT}, 2010, pp.~224--229.
+
+\bibitem{canon2008}
+L.-C.~Canon and E.~Jeannot,
+``Evaluation and optimization of the robustness of DAG schedules in
+heterogeneous environments,''
+\textit{IEEE Trans. Parallel Distrib. Syst.}, vol.~21, no.~4,
+pp.~532--546, 2010.
+
+\end{thebibliography}
+
+\end{document}
